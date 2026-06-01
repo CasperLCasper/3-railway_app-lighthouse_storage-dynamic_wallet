@@ -1,0 +1,23 @@
+{
+  "name": "nft-base-sepolia-testnet",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite public",
+    "build": "vite build public --outDir ../dist --emptyOutDir",
+    "preview": "vite preview public"
+  },
+  "dependencies": {
+    "@upstash/redis": "^1.13.0",
+    "ethers": "^6.13.0",
+    "jose": "^5.9.6",
+    "pinata": "latest"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0"
+  },
+  "overrides": {
+    "ws": "^8.18.0"
+  }
+}

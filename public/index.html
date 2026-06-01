@@ -1,0 +1,124 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dynamic Wallet Visualizer - Multichain</title>
+  
+  <meta http-equiv="X-UA-Compatible" content="IE=edge" />
+
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600;700&display=swap" rel="stylesheet" crossorigin="anonymous" />
+  <link rel="stylesheet" href="/style.css" />
+</head>
+<body>
+  <div class="warning-banner" id="warningBanner">
+    ⚠️ Please do not close this tab while recording video! ⚠️
+  </div>
+
+  <div class="container">
+    <header class="site-header">
+      <svg xmlns="http://www.w3.org/2000/svg" width="160" height="40" viewBox="0 0 158.74999 37.041668" class="logo">
+        <text xml:space="preserve" font-size="14.1111" font-family="'DejaVu Sans Mono', monospace" fill="#ffffff" stroke="none" stroke-width="0.264583" x="8.8499603" y="31.493832">
+          <tspan x="8.8499603" y="31.493832" fill="#ffffff">V I R S B U R T S</tspan>
+        </text>
+        <rect fill="#ffffff" stroke-width="0.264583" width="3.1013243" height="15.020124" x="5.9450045" y="3.8351295" />
+      </svg>
+      <div class="header-text">
+        <h1>Dynamic Wallet Visualizer</h1>
+        <p class="subtitle">Watch your Ethereum assets come alive — Create NFT on Manifold</p>
+      </div>
+    </header>
+
+    <div class="theme-selector">
+      <button class="theme-btn theme-classic active" data-theme="classic">⭐ CLASSIC</button>
+      <button class="theme-btn theme-forest" data-theme="forest">🌲 FOREST</button>
+      <button class="theme-btn theme-ocean" data-theme="ocean">🌊 OCEAN</button>
+      <button class="theme-btn theme-sunset" data-theme="sunset">🌅 SUNSET</button>
+      <button class="theme-btn theme-galaxy" data-theme="galaxy">✨ GALAXY</button>
+      <button class="theme-btn theme-rainbow" data-theme="rainbow">🌈 RAINBOW</button>
+      <button class="theme-btn theme-fire" data-theme="fire">🔥 FIRE</button>
+    </div>
+
+    <div class="chain-selector">
+      <div class="chain-label">
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+          <circle cx="12" cy="12" r="10"/>
+          <line x1="2" y1="12" x2="22" y2="12"/>
+          <path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/>
+        </svg>
+        <span>Blockchain</span>
+      </div>
+      <select id="chainSelect" class="chain-dropdown">
+        <optgroup label="🪙 Testnet">
+          <option value="sepolia" data-icon="🔷">🔷 Ethereum Sepolia</option>
+          <option value="mumbai" data-icon="🟣">🟣 Polygon Mumbai</option>
+          <option value="bscTestnet" data-icon="🟡">🟡 BNB Chain Testnet</option>
+          <option value="arbitrumSepolia" data-icon="🔵">🔵 Arbitrum Sepolia</option>
+          <option value="optimismSepolia" data-icon="🔴">🔴 Optimism Sepolia</option>
+          <option value="baseSepolia" data-icon="🔷">🔷 Base Sepolia</option>
+          <option value="avalancheFuji" data-icon="🟠">🟠 Avalanche Fuji</option>
+        </optgroup>
+        <optgroup label="🌟 Mainnet (Coming Soon)">
+          <option value="ethereum" disabled>🔷 Ethereum</option>
+          <option value="polygon" disabled>🟣 Polygon</option>
+          <option value="bsc" disabled>🟡 BNB Chain</option>
+          <option value="arbitrum" disabled>🔵 Arbitrum</option>
+          <option value="optimism" disabled>🔴 Optimism</option>
+          <option value="base" disabled>🔷 Base</option>
+          <option value="avalanche" disabled>🟠 Avalanche</option>
+        </optgroup>
+      </select>
+      <div class="chain-status" id="chainStatus"></div>
+    </div>
+
+    <div class="controls">
+      <button id="connectBtn">Connect Wallet</button>
+      <button id="renderBtn" disabled>Render Snapshot</button>
+      <button id="recordBtn" disabled>Record 15s HD Video</button>
+      <button id="generateNFTBtn" class="generate-nft-btn" disabled data-price="">Generate NFT on Base Sepolia</button>
+    </div>
+
+    <div id="accountDisplay">Connected account: —</div>
+    
+    <div id="progressBarContainer"><div id="progressBar"></div></div>
+    <div id="statusMsg" class="status"></div>
+    
+    <div id="recordTimer">Recording: 0 / 15 s</div>
+
+    <div class="snapshot-container">
+      <canvas id="snapshotCanvas" width="1920" height="1080"></canvas>
+      <div id="fullscreenIcon">⤢ Fullscreen</div>
+      <div id="toggleInfoIcon">ℹ Info</div>
+      
+      <div id="tokenListContainer">
+        <table>
+          <thead>
+            <tr>
+              <th>Address</th>
+              <th>Balance</th>
+            </tr>
+          </thead>
+          <tbody id="tokenListContent"></tbody>
+        </table>
+      </div>
+    </div>
+  </div>
+
+  <div id="ipfsPreview" class="ipfs-preview">
+    <strong>✅ NFT Created!</strong><br>
+    <span id="previewImage"></span><br>
+    <span id="previewVideo"></span><br>
+    <span id="previewMetadata"></span>
+  </div>
+
+  <div id="styleIndicator" class="active-style-indicator">
+    <span id="indicatorText">⭐ CLASSIC MODE - Original visualization</span>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/ethers@6.13.0/dist/ethers.umd.min.js"
+          integrity="sha384-JjzOKxQsr+Jhx75Ot1XldVFnWF2UCtB4Ig2JuEcuBt4VAdUG6alucV+sHrYjPn5C"
+          crossorigin="anonymous"></script>
+  
+  <script type="module" src="/app.js"></script>
+</body>
+</html>
