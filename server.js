@@ -3,7 +3,6 @@ import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 
-// Nodrošinām globālos File un Blob objektus Node.js vidē
 if (!globalThis.File) {
     const { File, Blob } = await import('node:buffer');
     globalThis.File = File;
@@ -16,11 +15,10 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Palielinām servera limitus līdz 100MB
 app.use(express.json({ limit: '100mb' }));
 app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
-// Pārtveram neapstrādāto buferi (raw body) tikai multipart pieprasījumiem
+// Pārtveram multipart datus pirms Express tos aiztiek
 app.use((req, res, next) => {
     if (req.headers['content-type'] && req.headers['content-type'].includes('multipart/form-data')) {
         let data = [];
@@ -66,7 +64,8 @@ function createCloudflareAdapter(handler) {
                 request: {
                     json: async () => req.body,
                     formData: async () => {
-                        const formData = new Map();
+                        // Izmantojam tīru, drošu glabātuvi
+                        const storage = {};
                         
                         if (req.rawBody) {
                             const contentType = req.headers['content-type'];
@@ -79,9 +78,8 @@ function createCloudflareAdapter(handler) {
                                 let offset = 0;
                                 while ((offset = buffer.indexOf(boundary, offset)) !== -1) {
                                     offset += boundary.length;
-                                    
-                                    if (buffer[offset] === 0x2d && buffer[offset + 1] === 0x2d) break; // Beigas --
-                                    offset += 2; // Izlaižam \r\n
+                                    if (buffer[offset] === 0x2d && buffer[offset + 1] === 0x2d) break;
+                                    offset += 2;
                                     
                                     const nextBoundary = buffer.indexOf(boundary, offset);
                                     if (nextBoundary === -1) break;
@@ -91,7 +89,7 @@ function createCloudflareAdapter(handler) {
                                     
                                     if (headerEnd !== -1) {
                                         const headerStr = part.subarray(0, headerEnd).toString('utf-8');
-                                        const body = part.subarray(headerEnd + 4, part.length - 2); // Atņemam \r\n
+                                        const body = part.subarray(headerEnd + 4, part.length - 2);
                                         
                                         const nameMatch = headerStr.match(/name="([^"]+)"/);
                                         const filenameMatch = headerStr.match(/filename="([^"]+)"/);
@@ -102,12 +100,9 @@ function createCloudflareAdapter(handler) {
                                             if (filenameMatch) {
                                                 const filename = filenameMatch[1];
                                                 const mimeType = typeMatch ? typeMatch[1] : 'image/png';
-                                                
-                                                // Izveidojam 100% precīzu File objektu no binārā bufera
-                                                const fileInstance = new File([body], filename, { type: mimeType });
-                                                formData.set(key, fileInstance);
+                                                storage[key] = new File([body], filename, { type: mimeType });
                                             } else {
-                                                formData.set(key, body.toString('utf-8'));
+                                                storage[key] = body.toString('utf-8');
                                             }
                                         }
                                     }
@@ -116,13 +111,17 @@ function createCloudflareAdapter(handler) {
                             }
                         }
                         
-                        // Pievienojam parastos laukus
                         if (req.body) {
-                            Object.keys(req.body).forEach(key => formData.set(key, req.body[key]));
+                            Object.keys(req.body).forEach(key => {
+                                storage[key] = req.body[key];
+                            });
                         }
                         
-                        formData.get = (key) => formData.get(key);
-                        return formData;
+                        // Šī ir DROŠĀ metodes emulācija, kas neizsauc sevi bezgalīgi
+                        return {
+                            get: (key) => storage[key] || null,
+                            has: (key) => key in storage
+                        };
                     },
                     url: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
                     headers: headersEmulator
