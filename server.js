@@ -16,11 +16,11 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Standarta JSON un URL apstrāde lieliem failiem
-app.use(express.json({ limit: '50mb' }));
-app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+// Palielinām servera limitus līdz 100MB
+app.use(express.json({ limit: '100mb' }));
+app.use(express.urlencoded({ extended: true, limit: '100mb' }));
 
-// Īpašs buferis, kas uztvers multipart/form-data (failus) bez multer bibliotēkas
+// Pārtveram neapstrādāto buferi (raw body) tikai multipart pieprasījumiem
 app.use((req, res, next) => {
     if (req.headers['content-type'] && req.headers['content-type'].includes('multipart/form-data')) {
         let data = [];
@@ -49,7 +49,7 @@ app.use((req, res, next) => {
     next();
 });
 
-// --- CLOUDFLARE -> EXPRESS ADAPTERIS (IEBŪVĒTĀ PARSĒŠANA) ---
+// --- CLOUDFLARE -> EXPRESS ADAPTERIS ---
 function createCloudflareAdapter(handler) {
     return async (req, res) => {
         try {
@@ -68,49 +68,59 @@ function createCloudflareAdapter(handler) {
                     formData: async () => {
                         const formData = new Map();
                         
-                        // Ja mums ir rawBody no multipart pieprasījuma, izvelkam failu
                         if (req.rawBody) {
                             const contentType = req.headers['content-type'];
                             const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
                             
                             if (boundaryMatch) {
-                                const boundary = boundaryMatch[1] || boundaryMatch[2];
-                                const bufferStr = req.rawBody.toString('binary');
-                                const parts = bufferStr.split('--' + boundary);
+                                const boundary = '--' + (boundaryMatch[1] || boundaryMatch[2]);
+                                const buffer = req.rawBody;
                                 
-                                for (const part of parts) {
-                                    if (part.includes('filename=')) {
-                                        // Izvelkam faila nosaukumu
-                                        const nameMatch = part.match(/name="([^"]+)"/);
-                                        const filenameMatch = part.match(/filename="([^"]+)"/);
-                                        const typeMatch = part.match(/Content-Type:\s*([^\s\r\n]+)/);
+                                let offset = 0;
+                                while ((offset = buffer.indexOf(boundary, offset)) !== -1) {
+                                    offset += boundary.length;
+                                    
+                                    if (buffer[offset] === 0x2d && buffer[offset + 1] === 0x2d) break; // Beigas --
+                                    offset += 2; // Izlaižam \r\n
+                                    
+                                    const nextBoundary = buffer.indexOf(boundary, offset);
+                                    if (nextBoundary === -1) break;
+                                    
+                                    const part = buffer.subarray(offset, nextBoundary);
+                                    const headerEnd = part.indexOf('\r\n\r\n');
+                                    
+                                    if (headerEnd !== -1) {
+                                        const headerStr = part.subarray(0, headerEnd).toString('utf-8');
+                                        const body = part.subarray(headerEnd + 4, part.length - 2); // Atņemam \r\n
                                         
-                                        if (nameMatch && filenameMatch) {
-                                            const fieldName = nameMatch[1];
-                                            const filename = filenameMatch[1];
-                                            const mimeType = typeMatch ? typeMatch[1] : 'image/png';
-                                            
-                                            // Atrodam kur beidzas galvenes un sākas paša faila dati
-                                            const headerEndIndex = part.indexOf('\r\n\r\n');
-                                            if (headerEndIndex !== -1) {
-                                                const fileContentBinary = part.substring(headerEndIndex + 4, part.length - 2);
-                                                const fileBuffer = Buffer.from(fileContentBinary, 'binary');
+                                        const nameMatch = headerStr.match(/name="([^"]+)"/);
+                                        const filenameMatch = headerStr.match(/filename="([^"]+)"/);
+                                        const typeMatch = headerStr.match(/Content-Type:\s*([^\s\r\n]+)/);
+                                        
+                                        if (nameMatch) {
+                                            const key = nameMatch[1];
+                                            if (filenameMatch) {
+                                                const filename = filenameMatch[1];
+                                                const mimeType = typeMatch ? typeMatch[1] : 'image/png';
                                                 
-                                                // Izveidojam autentisku globālo File objektu
-                                                const fileInstance = new File([fileBuffer], filename, { type: mimeType });
-                                                formData.set(fieldName, fileInstance);
+                                                // Izveidojam 100% precīzu File objektu no binārā bufera
+                                                const fileInstance = new File([body], filename, { type: mimeType });
+                                                formData.set(key, fileInstance);
+                                            } else {
+                                                formData.set(key, body.toString('utf-8'));
                                             }
                                         }
                                     }
+                                    offset = nextBoundary;
                                 }
                             }
                         }
-
+                        
                         // Pievienojam parastos laukus
                         if (req.body) {
                             Object.keys(req.body).forEach(key => formData.set(key, req.body[key]));
                         }
-
+                        
                         formData.get = (key) => formData.get(key);
                         return formData;
                     },
