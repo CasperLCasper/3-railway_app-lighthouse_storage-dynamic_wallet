@@ -9,11 +9,10 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Svarīgi: palielinām limitus, ja caur API tiek sūtīti lielāki faili/attēli
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// --- DROŠĪBAS MIDDLWARE (CSP un citas galvenes) ---
+// --- DROŠĪBAS MIDDLWARE (CSP) ---
 app.use((req, res, next) => {
     res.setHeader(
         'Content-Security-Policy',
@@ -28,47 +27,45 @@ app.use((req, res, next) => {
     next();
 });
 
-// --- AUTOMĀTISKAIS CLOUDFLARE -> EXPRESS ADAPTERIS ---
-function createCloudflareAdapter(handler, methodType) {
+// --- UZLABOTAIS CLOUDFLARE -> EXPRESS ADAPTERIS ---
+function createCloudflareAdapter(handler) {
     return async (req, res) => {
         try {
-            // Sagatavojam imitētu Cloudflare "context" objektu
+            // Sagatavojam imitētu Cloudflare context objektu
             const context = {
-                env: process.env, // Pārvirzām Railway mainīgos uz context.env
+                env: process.env, 
                 request: {
-                    // Imitējam context.request.json()
                     json: async () => req.body,
-                    // Imitējam context.request.url un meklēšanas parametrus
                     url: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
                     headers: req.headers
                 },
                 params: req.params
             };
 
-            // Izsaucam Cloudflare funkciju (piemēram, onRequestGet vai onRequestPost)
             const cfResponse = await handler(context);
 
-            // Ja funkcija atgriež standarta Cloudflare Response objektu
-            if (cfResponse instanceof Response) {
-                const contentType = cfResponse.headers.get('content-type') || '';
-                res.status(cfResponse.status);
+            // Ja atgriež standarta Cloudflare Response objektu
+            if (cfResponse && (cfResponse instanceof Response || typeof cfResponse.json === 'function')) {
+                res.status(cfResponse.status || 200);
                 
-                // Saliekam atpakaļ galvenes
-                cfResponse.headers.forEach((value, key) => {
-                    res.setHeader(key, value);
-                });
+                if (cfResponse.headers && typeof cfResponse.headers.forEach === 'function') {
+                    cfResponse.headers.forEach((value, key) => {
+                        res.setHeader(key, value);
+                    });
+                } else {
+                    res.setHeader('Content-Type', 'application/json');
+                }
 
-                if (contentType.includes('application/json')) {
+                try {
                     const jsonBuffer = await cfResponse.json();
                     return res.json(jsonBuffer);
-                } else {
+                } catch {
                     const textBuffer = await cfResponse.text();
                     return res.send(textBuffer);
                 }
             } 
             
-            // Ja funkcija jau ir bijusi modificēta kā parasts eksports
-            if (typeof cfResponse === 'object') {
+            if (cfResponse && typeof cfResponse === 'object') {
                 return res.json(cfResponse);
             }
 
@@ -101,24 +98,23 @@ async function walkRoutes(dir, routePrefix = '/api') {
                 const fileUrl = new URL(`file://${fullPath}`).href;
                 const module = await import(fileUrl);
                 
-                // Pārbaudām, kādas funkcijas fails eksportē (Cloudflare stils)
-                const hasGet = typeof module.onRequestGet === 'function';
-                const hasPost = typeof module.onRequestPost === 'function';
-                const hasGeneric = typeof module.onRequest === 'function';
-                const hasDefault = typeof module.default === 'function';
+                // Meklējam funkcijas neatkarīgi no reģistra (onRequestGet, onRequestGET, onrequestget)
+                const getHandler = module.onRequestGet || module.onRequestGET || module.onrequestget;
+                const postHandler = module.onRequestPost || module.onRequestPOST || module.onrequestpost;
+                const genericHandler = module.onRequest || module.onRequestGeneric;
+                const defaultHandler = module.default;
 
-                if (hasGet) {
-                    app.get(fullRoute, createCloudflareAdapter(module.onRequestGet, 'GET'));
+                if (getHandler) {
+                    app.get(fullRoute, createCloudflareAdapter(getHandler));
                 }
-                if (hasPost) {
-                    app.post(fullRoute, createCloudflareAdapter(module.onRequestPost, 'POST'));
+                if (postHandler) {
+                    app.post(fullRoute, createCloudflareAdapter(postHandler));
                 }
-                if (hasGeneric) {
-                    app.all(fullRoute, createCloudflareAdapter(module.onRequest, 'ALL'));
+                if (genericHandler) {
+                    app.all(fullRoute, createCloudflareAdapter(genericHandler));
                 }
-                if (hasDefault && !hasGet && !hasPost && !hasGeneric) {
-                    // Ja tas ir parastais Express noklusējuma handleris (kā mūsu labotie login/nonce)
-                    app.all(fullRoute, module.default);
+                if (defaultHandler && !getHandler && !postHandler && !genericHandler) {
+                    app.all(fullRoute, defaultHandler);
                 }
 
                 console.log(`Reģistrēts maršruts: ${fullRoute}`);
@@ -131,10 +127,8 @@ async function walkRoutes(dir, routePrefix = '/api') {
 
 await walkRoutes(apiDir);
 
-// Servējam frontend daļu no "public" mapes
 app.use(express.static(path.join(__dirname, 'public')));
 
-// Ja klients pieprasa jebko citu, nosūtām index.html
 app.get('*', (req, res) => {
     res.sendFile(path.join(__dirname, 'public', 'index.html'));
 });
