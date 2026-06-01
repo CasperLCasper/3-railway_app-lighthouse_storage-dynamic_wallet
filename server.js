@@ -9,29 +9,78 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-app.use(express.json());
+// Svarīgi: palielinām limitus, ja caur API tiek sūtīti lielāki faili/attēli
+app.use(express.json({ limit: '50mb' }));
+app.use(express.urlencoded({ extended: true, limit: '50mb' }));
 
-// --- DROŠĪBAS MIDDLWARE (Pārnests no tavas Cloudflare functions/_middleware.js) ---
+// --- DROŠĪBAS MIDDLWARE (CSP un citas galvenes) ---
 app.use((req, res, next) => {
-    // Tava pilnā CSP politika
     res.setHeader(
         'Content-Security-Policy',
         "default-src 'none'; script-src 'self' https://cdn.jsdelivr.net chrome-extension:; connect-src 'self' https: wss: chrome-extension:; img-src 'self' data: https: blob:; style-src 'self' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; media-src 'self' blob:; video-src 'self' blob:; object-src 'none'; frame-ancestors 'none'; form-action 'self'; base-uri 'self'; manifest-src 'self'; worker-src 'self' blob:; upgrade-insecure-requests;"
     );
-
-    // Pārējās drošības galvenes no tava faila
     res.setHeader('Cross-Origin-Resource-Policy', 'same-origin');
     res.setHeader('X-Frame-Options', 'DENY');
     res.setHeader('X-Content-Type-Options', 'nosniff');
     res.setHeader('Referrer-Policy', 'strict-origin-when-cross-origin');
     res.setHeader('Permissions-Policy', 'geolocation=(), camera=(), microphone=()');
     res.setHeader('Strict-Transport-Security', 'max-age=31536000; includeSubDomains');
-
     next();
 });
-// ---------------------------------------------------------------------------------
 
-// Automātiski ielādējam API maršrutus no tavas "functions/api" mapes
+// --- AUTOMĀTISKAIS CLOUDFLARE -> EXPRESS ADAPTERIS ---
+function createCloudflareAdapter(handler, methodType) {
+    return async (req, res) => {
+        try {
+            // Sagatavojam imitētu Cloudflare "context" objektu
+            const context = {
+                env: process.env, // Pārvirzām Railway mainīgos uz context.env
+                request: {
+                    // Imitējam context.request.json()
+                    json: async () => req.body,
+                    // Imitējam context.request.url un meklēšanas parametrus
+                    url: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
+                    headers: req.headers
+                },
+                params: req.params
+            };
+
+            // Izsaucam Cloudflare funkciju (piemēram, onRequestGet vai onRequestPost)
+            const cfResponse = await handler(context);
+
+            // Ja funkcija atgriež standarta Cloudflare Response objektu
+            if (cfResponse instanceof Response) {
+                const contentType = cfResponse.headers.get('content-type') || '';
+                res.status(cfResponse.status);
+                
+                // Saliekam atpakaļ galvenes
+                cfResponse.headers.forEach((value, key) => {
+                    res.setHeader(key, value);
+                });
+
+                if (contentType.includes('application/json')) {
+                    const jsonBuffer = await cfResponse.json();
+                    return res.json(jsonBuffer);
+                } else {
+                    const textBuffer = await cfResponse.text();
+                    return res.send(textBuffer);
+                }
+            } 
+            
+            // Ja funkcija jau ir bijusi modificēta kā parasts eksports
+            if (typeof cfResponse === 'object') {
+                return res.json(cfResponse);
+            }
+
+            res.status(200).end();
+        } catch (err) {
+            console.error(`Kļūda adapterī izpildot maršrutu:`, err);
+            res.status(500).json({ error: "Internal Server Error", message: err.message });
+        }
+    };
+}
+
+// Automātiski ielādējam API maršrutus no "functions/api" mapes
 const apiDir = path.join(__dirname, 'functions', 'api');
 
 async function walkRoutes(dir, routePrefix = '/api') {
@@ -50,16 +99,28 @@ async function walkRoutes(dir, routePrefix = '/api') {
             
             try {
                 const fileUrl = new URL(`file://${fullPath}`).href;
-                const handlerModule = await import(fileUrl);
-                const handler = handlerModule.default || handlerModule;
+                const module = await import(fileUrl);
+                
+                // Pārbaudām, kādas funkcijas fails eksportē (Cloudflare stils)
+                const hasGet = typeof module.onRequestGet === 'function';
+                const hasPost = typeof module.onRequestPost === 'function';
+                const hasGeneric = typeof module.onRequest === 'function';
+                const hasDefault = typeof module.default === 'function';
 
-                app.all(fullRoute, (req, res) => {
-                    if (typeof handler === 'function') {
-                        handler(req, res);
-                    } else {
-                        res.status(500).send('API handler nav atrasts vai nav funkcija');
-                    }
-                });
+                if (hasGet) {
+                    app.get(fullRoute, createCloudflareAdapter(module.onRequestGet, 'GET'));
+                }
+                if (hasPost) {
+                    app.post(fullRoute, createCloudflareAdapter(module.onRequestPost, 'POST'));
+                }
+                if (hasGeneric) {
+                    app.all(fullRoute, createCloudflareAdapter(module.onRequest, 'ALL'));
+                }
+                if (hasDefault && !hasGet && !hasPost && !hasGeneric) {
+                    // Ja tas ir parastais Express noklusējuma handleris (kā mūsu labotie login/nonce)
+                    app.all(fullRoute, module.default);
+                }
+
                 console.log(`Reģistrēts maršruts: ${fullRoute}`);
             } catch (e) {
                 console.error(`Kļūda ielādējot maršrutu ${fullRoute}:`, e);
@@ -70,7 +131,7 @@ async function walkRoutes(dir, routePrefix = '/api') {
 
 await walkRoutes(apiDir);
 
-// Servējam tavu frontend daļu no "public" mapes
+// Servējam frontend daļu no "public" mapes
 app.use(express.static(path.join(__dirname, 'public')));
 
 // Ja klients pieprasa jebko citu, nosūtām index.html
