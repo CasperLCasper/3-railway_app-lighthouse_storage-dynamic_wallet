@@ -27,24 +27,31 @@ app.use((req, res, next) => {
     next();
 });
 
-// --- UZLABOTAIS CLOUDFLARE -> EXPRESS ADAPTERIS ---
+// --- CLOUDFLARE -> EXPRESS ADAPTERIS AR .get() ATBALSTU ---
 function createCloudflareAdapter(handler) {
     return async (req, res) => {
         try {
-            // Sagatavojam imitētu Cloudflare context objektu
+            // Izveidojam headers emulatoru, kam ir .get() funkcija
+            const headersEmulator = {
+                ...req.headers,
+                get: (headerName) => {
+                    const name = headerName.toLowerCase();
+                    return req.headers[name] || null;
+                }
+            };
+
             const context = {
                 env: process.env, 
                 request: {
                     json: async () => req.body,
                     url: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
-                    headers: req.headers
+                    headers: headersEmulator // Iedodam gudro headers objektu
                 },
                 params: req.params
             };
 
             const cfResponse = await handler(context);
 
-            // Ja atgriež standarta Cloudflare Response objektu
             if (cfResponse && (cfResponse instanceof Response || typeof cfResponse.json === 'function')) {
                 res.status(cfResponse.status || 200);
                 
@@ -77,7 +84,7 @@ function createCloudflareAdapter(handler) {
     };
 }
 
-// Automātiski ielādējam API maršrutus no "functions/api" mapes
+// Automātiski ielādējam API maršrutus
 const apiDir = path.join(__dirname, 'functions', 'api');
 
 async function walkRoutes(dir, routePrefix = '/api') {
@@ -98,7 +105,6 @@ async function walkRoutes(dir, routePrefix = '/api') {
                 const fileUrl = new URL(`file://${fullPath}`).href;
                 const module = await import(fileUrl);
                 
-                // Meklējam funkcijas neatkarīgi no reģistra (onRequestGet, onRequestGET, onrequestget)
                 const getHandler = module.onRequestGet || module.onRequestGET || module.onrequestget;
                 const postHandler = module.onRequestPost || module.onRequestPOST || module.onrequestpost;
                 const genericHandler = module.onRequest || module.onRequestGeneric;
