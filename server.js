@@ -2,12 +2,23 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
+import multer from 'multer';
+
+// Nodrošinām, ka Node.js vidē ir pieejami globālie File un Blob (ja vecāka versija)
+if (!globalThis.File) {
+    const { File, Blob } = await import('node:buffer');
+    globalThis.File = File;
+    globalThis.Blob = Blob;
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+
+// Konfigurējam multer failu saglabāšanai atmiņā (Buffer) līdz 50MB
+const upload = multer({ limits: { fileSize: 50 * 1024 * 1024 } });
 
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
@@ -27,11 +38,10 @@ app.use((req, res, next) => {
     next();
 });
 
-// --- CLOUDFLARE -> EXPRESS ADAPTERIS AR .get() ATBALSTU ---
+// --- CLOUDFLARE -> EXPRESS ADAPTERIS AR PILNU FORM-DATA UN FILE ATBALSTU ---
 function createCloudflareAdapter(handler) {
     return async (req, res) => {
         try {
-            // Izveidojam headers emulatoru, kam ir .get() funkcija
             const headersEmulator = {
                 ...req.headers,
                 get: (headerName) => {
@@ -44,8 +54,36 @@ function createCloudflareAdapter(handler) {
                 env: process.env, 
                 request: {
                     json: async () => req.body,
+                    // Emulējam Cloudflare context.request.formData() ar īstām File instancēm
+                    formData: async () => {
+                        const formData = new Map();
+                        
+                        // Apstrādājam failus no multer
+                        if (req.files && Array.isArray(req.files)) {
+                            req.files.forEach(file => {
+                                // Izveidojam autentisku globālo File objektu, ko pieprasa "instanceof File" pārbaude
+                                const fileInstance = new File([file.buffer], file.originalname, { type: file.mimetype });
+                                formData.set(file.fieldname, fileInstance);
+                            });
+                        } else if (req.file) {
+                            const fileInstance = new File([req.file.buffer], req.file.originalname, { type: req.file.mimetype });
+                            formData.set(req.file.fieldname, fileInstance);
+                        }
+
+                        // Pievienojam parastos teksta laukus, ja tādi ir atsūtīti
+                        if (req.body) {
+                            Object.keys(req.body).forEach(key => {
+                                formData.set(key, req.body[key]);
+                            });
+                        }
+
+                        // Pievienojam .get() metodi, lai emulētu FormData klasi
+                        formData.get = (key) => formData.get(key);
+                        
+                        return formData;
+                    },
                     url: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
-                    headers: headersEmulator // Iedodam gudro headers objektu
+                    headers: headersEmulator
                 },
                 params: req.params
             };
@@ -110,17 +148,18 @@ async function walkRoutes(dir, routePrefix = '/api') {
                 const genericHandler = module.onRequest || module.onRequestGeneric;
                 const defaultHandler = module.default;
 
+                // Visur, kur ir POST pieprasījumi, ļaujam multer uztvert failus
                 if (getHandler) {
                     app.get(fullRoute, createCloudflareAdapter(getHandler));
                 }
                 if (postHandler) {
-                    app.post(fullRoute, createCloudflareAdapter(postHandler));
+                    app.post(fullRoute, upload.any(), createCloudflareAdapter(postHandler));
                 }
                 if (genericHandler) {
-                    app.all(fullRoute, createCloudflareAdapter(genericHandler));
+                    app.all(fullRoute, upload.any(), createCloudflareAdapter(genericHandler));
                 }
                 if (defaultHandler && !getHandler && !postHandler && !genericHandler) {
-                    app.all(fullRoute, defaultHandler);
+                    app.all(fullRoute, upload.any(), defaultHandler);
                 }
 
                 console.log(`Reģistrēts maršruts: ${fullRoute}`);
