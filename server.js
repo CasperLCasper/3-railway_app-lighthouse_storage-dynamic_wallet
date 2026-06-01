@@ -2,9 +2,8 @@ import express from 'express';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
-import multer from 'multer';
 
-// Nodrošinām, ka Node.js vidē ir pieejami globālie File un Blob (ja vecāka versija)
+// Nodrošinām globālos File un Blob objektus Node.js vidē
 if (!globalThis.File) {
     const { File, Blob } = await import('node:buffer');
     globalThis.File = File;
@@ -17,11 +16,23 @@ const __dirname = path.dirname(__filename);
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Konfigurējam multer failu saglabāšanai atmiņā (Buffer) līdz 50MB
-const upload = multer({ limits: { fileSize: 50 * 1024 * 1024 } });
-
+// Standarta JSON un URL apstrāde lieliem failiem
 app.use(express.json({ limit: '50mb' }));
 app.use(express.urlencoded({ extended: true, limit: '50mb' }));
+
+// Īpašs buferis, kas uztvers multipart/form-data (failus) bez multer bibliotēkas
+app.use((req, res, next) => {
+    if (req.headers['content-type'] && req.headers['content-type'].includes('multipart/form-data')) {
+        let data = [];
+        req.on('data', chunk => data.push(chunk));
+        req.on('end', () => {
+            req.rawBody = Buffer.concat(data);
+            next();
+        });
+    } else {
+        next();
+    }
+});
 
 // --- DROŠĪBAS MIDDLWARE (CSP) ---
 app.use((req, res, next) => {
@@ -38,7 +49,7 @@ app.use((req, res, next) => {
     next();
 });
 
-// --- CLOUDFLARE -> EXPRESS ADAPTERIS AR PILNU FORM-DATA UN FILE ATBALSTU ---
+// --- CLOUDFLARE -> EXPRESS ADAPTERIS (IEBŪVĒTĀ PARSĒŠANA) ---
 function createCloudflareAdapter(handler) {
     return async (req, res) => {
         try {
@@ -54,32 +65,53 @@ function createCloudflareAdapter(handler) {
                 env: process.env, 
                 request: {
                     json: async () => req.body,
-                    // Emulējam Cloudflare context.request.formData() ar īstām File instancēm
                     formData: async () => {
                         const formData = new Map();
                         
-                        // Apstrādājam failus no multer
-                        if (req.files && Array.isArray(req.files)) {
-                            req.files.forEach(file => {
-                                // Izveidojam autentisku globālo File objektu, ko pieprasa "instanceof File" pārbaude
-                                const fileInstance = new File([file.buffer], file.originalname, { type: file.mimetype });
-                                formData.set(file.fieldname, fileInstance);
-                            });
-                        } else if (req.file) {
-                            const fileInstance = new File([req.file.buffer], req.file.originalname, { type: req.file.mimetype });
-                            formData.set(req.file.fieldname, fileInstance);
+                        // Ja mums ir rawBody no multipart pieprasījuma, izvelkam failu
+                        if (req.rawBody) {
+                            const contentType = req.headers['content-type'];
+                            const boundaryMatch = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+                            
+                            if (boundaryMatch) {
+                                const boundary = boundaryMatch[1] || boundaryMatch[2];
+                                const bufferStr = req.rawBody.toString('binary');
+                                const parts = bufferStr.split('--' + boundary);
+                                
+                                for (const part of parts) {
+                                    if (part.includes('filename=')) {
+                                        // Izvelkam faila nosaukumu
+                                        const nameMatch = part.match(/name="([^"]+)"/);
+                                        const filenameMatch = part.match(/filename="([^"]+)"/);
+                                        const typeMatch = part.match(/Content-Type:\s*([^\s\r\n]+)/);
+                                        
+                                        if (nameMatch && filenameMatch) {
+                                            const fieldName = nameMatch[1];
+                                            const filename = filenameMatch[1];
+                                            const mimeType = typeMatch ? typeMatch[1] : 'image/png';
+                                            
+                                            // Atrodam kur beidzas galvenes un sākas paša faila dati
+                                            const headerEndIndex = part.indexOf('\r\n\r\n');
+                                            if (headerEndIndex !== -1) {
+                                                const fileContentBinary = part.substring(headerEndIndex + 4, part.length - 2);
+                                                const fileBuffer = Buffer.from(fileContentBinary, 'binary');
+                                                
+                                                // Izveidojam autentisku globālo File objektu
+                                                const fileInstance = new File([fileBuffer], filename, { type: mimeType });
+                                                formData.set(fieldName, fileInstance);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
 
-                        // Pievienojam parastos teksta laukus, ja tādi ir atsūtīti
+                        // Pievienojam parastos laukus
                         if (req.body) {
-                            Object.keys(req.body).forEach(key => {
-                                formData.set(key, req.body[key]);
-                            });
+                            Object.keys(req.body).forEach(key => formData.set(key, req.body[key]));
                         }
 
-                        // Pievienojam .get() metodi, lai emulētu FormData klasi
                         formData.get = (key) => formData.get(key);
-                        
                         return formData;
                     },
                     url: `${req.protocol}://${req.get('host')}${req.originalUrl}`,
@@ -94,9 +126,7 @@ function createCloudflareAdapter(handler) {
                 res.status(cfResponse.status || 200);
                 
                 if (cfResponse.headers && typeof cfResponse.headers.forEach === 'function') {
-                    cfResponse.headers.forEach((value, key) => {
-                        res.setHeader(key, value);
-                    });
+                    cfResponse.headers.forEach((value, key) => res.setHeader(key, value));
                 } else {
                     res.setHeader('Content-Type', 'application/json');
                 }
@@ -122,7 +152,6 @@ function createCloudflareAdapter(handler) {
     };
 }
 
-// Automātiski ielādējam API maršrutus
 const apiDir = path.join(__dirname, 'functions', 'api');
 
 async function walkRoutes(dir, routePrefix = '/api') {
@@ -148,18 +177,11 @@ async function walkRoutes(dir, routePrefix = '/api') {
                 const genericHandler = module.onRequest || module.onRequestGeneric;
                 const defaultHandler = module.default;
 
-                // Visur, kur ir POST pieprasījumi, ļaujam multer uztvert failus
-                if (getHandler) {
-                    app.get(fullRoute, createCloudflareAdapter(getHandler));
-                }
-                if (postHandler) {
-                    app.post(fullRoute, upload.any(), createCloudflareAdapter(postHandler));
-                }
-                if (genericHandler) {
-                    app.all(fullRoute, upload.any(), createCloudflareAdapter(genericHandler));
-                }
+                if (getHandler) app.get(fullRoute, createCloudflareAdapter(getHandler));
+                if (postHandler) app.post(fullRoute, createCloudflareAdapter(postHandler));
+                if (genericHandler) app.all(fullRoute, createCloudflareAdapter(genericHandler));
                 if (defaultHandler && !getHandler && !postHandler && !genericHandler) {
-                    app.all(fullRoute, upload.any(), defaultHandler);
+                    app.all(fullRoute, defaultHandler);
                 }
 
                 console.log(`Reģistrēts maršruts: ${fullRoute}`);
